@@ -12,7 +12,7 @@ config = AgentAppConfig()
 server_params = StdioServerParameters(
     command="docker",
     args=["run", "-i", "--rm", "-e", "PERPLEXITY_API_KEY", "mcp/perplexity-ask"],
-    env={"PERPLEXITY_API_KEY": config.PERPLEXITY_API_KEY},
+    env={"PERPLEXITY_API_KEY": "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"},
 )
 
 
