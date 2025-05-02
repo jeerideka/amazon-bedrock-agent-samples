@@ -2,6 +2,9 @@ import asyncio
 import uuid
 import warnings
 import urllib3
+import time
+from botocore.exceptions import EventStreamError
+from functools import wraps
 
 # Disable SSL warnings
 urllib3.disable_warnings(urllib3.exceptions.InsecureRequestWarning)
@@ -214,6 +217,41 @@ async def initialize_supervisor_agent():
     
     return supervisor
 
+# Retry decorator with exponential backoff for handling throttling exceptions
+def retry_with_backoff(max_retries=5, initial_backoff=1, backoff_multiplier=2):
+    """Decorator to retry functions with exponential backoff when throttling occurs"""
+    def decorator(func):
+        @wraps(func)
+        async def wrapper(*args, **kwargs):
+            retries = 0
+            current_backoff = initial_backoff
+            
+            while True:
+                try:
+                    return await func(*args, **kwargs)
+                except Exception as e:
+                    # Check if this is a throttling exception
+                    if isinstance(e, EventStreamError) and 'throttlingException' in str(e):
+                        retries += 1
+                        if retries > max_retries:
+                            print(f"Maximum retries ({max_retries}) exceeded for throttling. Giving up.")
+                            raise
+                        
+                        # Calculate backoff time with jitter
+                        jitter = 0.1 * current_backoff * (asyncio.get_event_loop().time() % 1.0)
+                        wait_time = current_backoff + jitter
+                        
+                        print(f"Throttling detected. Retry {retries}/{max_retries} after {wait_time:.2f} seconds")
+                        await asyncio.sleep(wait_time)
+                        
+                        # Increase backoff for next retry
+                        current_backoff *= backoff_multiplier
+                    else:
+                        # Not a throttling exception, re-raise
+                        raise
+        return wrapper
+    return decorator
+
 # Function to process a single message with the supervisor agent and cleanup properly
 async def process_message(message, session_id):
     """Process a single message with the supervisor agent and clean up properly"""
@@ -224,11 +262,16 @@ async def process_message(message, session_id):
         # Initialize the agent
         supervisor = await initialize_supervisor_agent()
         
-        # Process the message
-        response = await supervisor.invoke(
-            input_text=message,
-            session_id=session_id
-        )
+        # Define retry function
+        @retry_with_backoff(max_retries=3, initial_backoff=2)
+        async def invoke_with_retry():
+            return await supervisor.invoke(
+                input_text=message,
+                session_id=session_id
+            )
+        
+        # Call retry function
+        response = await invoke_with_retry()
         
         # Process the response to make it more suitable for end users
         # Option 1: Extract just the Bot response if present
@@ -269,7 +312,9 @@ async def main():
             agent_name="supervisor_agent",
             action_groups=[preplexity_action_group],
             collaborators=[itinerary_agent],
-            agent_collaboration="SUPERVISOR"
+            agent_collaboration="SUPERVISOR",
+            #streaming_configurations={"streamFinalResponse": True},
+            #enableTrace=True
         )
         
         session_id = str(uuid.uuid4())
@@ -277,12 +322,19 @@ async def main():
         while True:
             user_query = input("Assistant: How can I help you?\n")
 
-            # Directly call supervisor.invoke without the observability wrapper
-            # We'll add observability at a different level if needed later
-            await supervisor.invoke(
-                input_text=user_query,
-                session_id=session_id
-            )
+            # Define retry function
+            @retry_with_backoff(max_retries=3, initial_backoff=2)
+            async def invoke_with_retry():
+                return await supervisor.invoke(
+                    input_text=user_query,
+                    session_id=session_id
+                )
+            
+            # Add a slight delay between requests to avoid throttling
+            await asyncio.sleep(1)  # 1 second delay between requests
+            
+            # Call retry function
+            await invoke_with_retry()
 
     finally:
         await preplexity_mcp_client.cleanup()

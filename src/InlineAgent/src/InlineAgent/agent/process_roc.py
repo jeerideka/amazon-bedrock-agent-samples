@@ -47,15 +47,45 @@ class ProcessROC:
                     result = None
                     try:
                         result = json.loads(param["value"])
-                    except Exception:
-                        json_str = (
-                            param["value"]
-                            .replace("=", ":")
-                            .replace("[{", '[{"')
-                            .replace("}]", '"}]')
-                        )
-                        json_str = json_str.replace(", ", '", "').replace(":", '":"')
-                        result = json.loads(json_str)
+                    except Exception as e:
+                        print(f"JSON parsing error: {str(e)}")
+                        print(f"Attempting to fix malformed JSON: {param['value']}")
+                        try:
+                            # More robust JSON string handling
+                            json_str = param["value"]
+                            # First try to detect if it's already in a valid format but with syntax errors
+                            if json_str.startswith('{') or json_str.startswith('['):
+                                # Try different approaches to fix common JSON errors
+                                try:
+                                    # Try to evaluate as Python literal
+                                    import ast
+                                    result = ast.literal_eval(json_str)
+                                except:
+                                    # If that doesn't work, try more aggressive replacements
+                                    json_str = (
+                                        json_str
+                                        .replace("=", ":")
+                                        .replace("[{", '[{"')
+                                        .replace("}]", '"}]')
+                                    )
+                                    json_str = json_str.replace(", ", '", "').replace(":", '":"')
+                                    # Fix double replacement of colons inside already quoted strings
+                                    json_str = json_str.replace('"":""', '":"')
+                                    result = json.loads(json_str)
+                            else:
+                                # Handle non-JSON formatted strings
+                                # Convert from key=value format to JSON
+                                pairs = [p.strip() for p in json_str.split(',')]
+                                result_dict = {}
+                                for pair in pairs:
+                                    if '=' in pair:
+                                        k, v = pair.split('=', 1)
+                                        result_dict[k.strip()] = v.strip()
+                                result = result_dict
+                        except Exception as parse_error:
+                            print(f"Failed to fix JSON: {str(parse_error)}")
+                            # As a last resort, just return the string as-is
+                            result = param["value"]
                     finally:
                         parameters[param["name"]] = result
                 elif param["type"] == "string":
